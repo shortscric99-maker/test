@@ -15,7 +15,10 @@ self.addEventListener('backgroundfetchsuccess', e => {
     try {
       for (const rec of await reg.matchAll()) {
         const res = await rec.responseReady;
-        if (!res.ok) { ok = false; error = 'Drive error ' + res.status; }
+        if (!res.ok) { ok = false; error = 'Uploader error ' + res.status; continue; }
+        let j = null;
+        try { j = await res.json(); } catch (err) {}
+        if (!j || !j.ok) { ok = false; error = (j && j.error) || 'Uploader gave no valid answer'; }
       }
     } catch (err) { ok = false; error = 'No answer from Drive'; }
     await e.updateUI({ title: ok ? 'Uploaded ✓' : 'Upload failed' });
@@ -33,4 +36,3 @@ self.addEventListener('backgroundfetchfail', e => {
 
 self.addEventListener('backgroundfetchabort', e => e.waitUntil(tell({ id: e.registration.id, ok: false, error: 'Cancelled' })));
 self.addEventListener('backgroundfetchclick', e => e.waitUntil(self.clients.openWindow('./')));
-                      
