@@ -60,6 +60,9 @@ li.done .st{color:var(--accent)}li.fail .st{color:var(--bad)}li.fail .bar i{back
   <label class="tog"><span>Background upload</span><input type="checkbox" id="bg"></label>
   <p class="hint" id="bgnote">Keeps uploading after you close this tab. Chrome on Android only.</p>
 
+  <label class="tog"><span>Anonymous</span><input type="checkbox" id="anon"></label>
+  <p class="hint">Turns the page blank white when you press Upload. Triple-tap the screen to bring it back.</p>
+
   <button type="button" id="go" disabled>Upload</button>
   <p id="msg" role="status"></p>
   <ul id="list"></ul>
@@ -125,6 +128,7 @@ const row = (li, text) => { li.querySelector('.st').textContent = text; };
 // Press Upload
 go.addEventListener('click', async () => {
   if (!pass.value) { say('Enter your passcode first.', 'bad'); pass.focus(); return; }
+  if (anonBox.checked) goBlank();
   if (bgBox.checked && bgOK) { await runBackground(); return; }
   busy = true; refresh();
   const todo = items.filter(i => !i.done);
@@ -196,60 +200,120 @@ function bgListen() {
   bgListening = true;
   navigator.serviceWorker.addEventListener('message', e => {
     const m = e.data || {};
-    const it = items.find(i => i.bgId === m.id);
+    const it = items.find(i => i.key === m.key);
     if (!it) return;
+    it.fin = true;
     if (m.ok) { it.li.querySelector('i').style.width = '100%'; row(it.li, 'Uploaded ✓'); it.li.classList.add('done'); }
     else { it.done = false; row(it.li, m.error || 'Upload failed'); it.li.classList.add('fail'); refresh(); }
   });
 }
 
-const BG_MAX = 40 * 1048576; // bigger files use the normal upload
+const BG_MAX = 25 * 1048576;   // bigger files use the normal upload
+const BG_GROUP = 30 * 1048576; // files are bundled into Chrome jobs of about this size
+let keyN = 0;
+
+const toB64 = f => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(r.result.slice(r.result.indexOf(',') + 1));
+  r.onerror = () => rej(new Error('Could not read file'));
+  r.readAsDataURL(f);
+});
 
 async function runBackground() {
   busy = true; refresh();
   const todo = items.filter(i => !i.done);
-  let queued = 0, normal = 0, refused = '', stop = '';
+  const big = todo.filter(i => i.file.size > BG_MAX);
+  const groups = []; let cur = [], sum = 0;
+  todo.filter(i => i.file.size <= BG_MAX).forEach(it => {
+    if (cur.length && sum + it.file.size > BG_GROUP) { groups.push(cur); cur = []; sum = 0; }
+    cur.push(it); sum += it.file.size;
+  });
+  if (cur.length) groups.push(cur);
+
+  let queued = 0, refused = '', stop = '';
   try {
     say('Handing files to Chrome…');
     await navigator.serviceWorker.register('sw.js');
     const reg = await navigator.serviceWorker.ready;
     bgListen();
-    for (const it of todo) {
-      const { file, li } = it;
-      li.classList.remove('fail');
-      if (file.size > BG_MAX) { normal++; await upload(it); continue; }
+    for (const g of groups) {
       try {
-        const id = 'up-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
-        const url = SCRIPT_URL + '?direct=1&secret=' + encodeURIComponent(pass.value) +
-          '&name=' + encodeURIComponent(file.name) + '&type=' + encodeURIComponent(file.type || 'application/octet-stream');
-        const req = new Request(url, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: file });
+        const reqs = [];
+        for (const it of g) {
+          row(it.li, 'Preparing…'); it.li.classList.remove('fail'); it.fin = false;
+          it.key = 'k' + (++keyN);
+          const body = await toB64(it.file);
+          const url = SCRIPT_URL + '?direct=1&k=' + it.key + '&secret=' + encodeURIComponent(pass.value) +
+            '&name=' + encodeURIComponent(it.file.name) + '&type=' + encodeURIComponent(it.file.type || 'application/octet-stream');
+          reqs.push(new Request(url, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body }));
+        }
         let bf;
         try {
-          bf = await reg.backgroundFetch.fetch(id, req, { title: 'Uploading ' + file.name });
+          bf = await reg.backgroundFetch.fetch('up-' + Date.now() + '-' + keyN, reqs, { title: 'Uploading ' + g.length + (g.length > 1 ? ' files' : ' file') });
         } catch (e) {
           refused = e.name + ': ' + e.message;
-          await upload(it); // Chrome said no: do the normal upload (tab must stay open)
+          for (const it of g) await upload(it); // Chrome said no: normal upload, tab must stay open
           continue;
         }
-        it.bgId = id; it.done = true; queued++;
-        row(li, 'Sent to Chrome');
+        g.forEach(it => { it.done = true; row(it.li, 'Sent to Chrome'); });
+        queued += g.length;
         bf.addEventListener('progress', () => {
           if (!bf.uploadTotal || bf.result === 'success') return;
           const p = Math.round(bf.uploaded / bf.uploadTotal * 100);
-          li.querySelector('i').style.width = p + '%'; row(li, 'Uploading ' + p + '%');
+          g.forEach(it => { if (!it.fin) { it.li.querySelector('i').style.width = p + '%'; row(it.li, 'Uploading ' + p + '%'); } });
         });
       } catch (err) {
-        row(li, err.message); li.classList.add('fail');
+        g.forEach(it => { row(it.li, err.message); it.li.classList.add('fail'); });
       }
     }
+    if (big.length) say('Large files upload the normal way. Keep this page open.');
+    for (const it of big) await upload(it);
   } catch (err) {
     stop = 'Background mode could not start: ' + err.message;
   }
   busy = false; refresh();
   if (stop) say(stop, 'bad');
-  else if (refused) say('Chrome refused background mode (' + refused + '). Files were uploaded the normal way instead.', 'bad');
+  else if (refused) say('Chrome refused background mode (' + refused + '). Those files were uploaded the normal way instead.', 'bad');
   else say((queued ? queued + (queued > 1 ? ' files are' : ' file is') + ' with Chrome now. You can close this tab. ' : '') +
-           (normal ? normal + (normal > 1 ? ' files' : ' file') + ' over 40 MB uploaded the normal way.' : ''), 'ok');
+           (big.length ? big.length + (big.length > 1 ? ' files' : ' file') + ' over 25 MB uploaded the normal way.' : ''), 'ok');
+}
+
+// ---------- Anonymous mode (separate feature, off by default, not remembered) ----------
+const anonBox = $('anon');
+let cover = null, taps = [], wake = null;
+const pageTitle = document.title;
+
+function goBlank() {
+  if (cover) return;
+  cover = document.createElement('div');
+  cover.style.cssText = 'position:fixed;inset:0;background:#fff;z-index:2147483647;touch-action:none';
+  cover.addEventListener('click', () => {
+    const now = Date.now();
+    taps = taps.filter(t => now - t < 900).concat(now);
+    if (taps.length >= 3) unBlank();
+  });
+  document.body.appendChild(cover);
+  document.title = ' ';
+  keepAwake();
+}
+
+function unBlank() {
+  if (cover) cover.remove();
+  cover = null; taps = [];
+  document.title = pageTitle;
+}
+
+// Keep the screen on while files upload, so the phone does not pause the page
+async function keepAwake() {
+  try { if ('wakeLock' in navigator) wake = await navigator.wakeLock.request('screen'); } catch (e) {}
+  let seen = false, idle = 0;
+  const t = setInterval(() => {
+    if (busy) seen = true;
+    if (busy || (!seen && ++idle < 30)) return;
+    clearInterval(t);
+    try { wake && wake.release(); } catch (e) {}
+    wake = null;
+  }, 1000);
 }
 </script>
 </body>
