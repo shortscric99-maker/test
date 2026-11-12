@@ -32,6 +32,13 @@ li{background:var(--card);border:1px solid var(--line);border-radius:10px;paddin
 .bar{height:6px;margin-top:8px;background:var(--line);border-radius:3px;overflow:hidden}
 .bar i{display:block;height:100%;width:0;background:var(--accent)}
 li.done .st{color:var(--accent)}li.fail .st{color:var(--bad)}li.fail .bar i{background:var(--bad)}
+.tog{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:18px 0 0;font-weight:600;cursor:pointer}
+.tog input{appearance:none;-webkit-appearance:none;width:46px;height:26px;border-radius:13px;background:var(--line);position:relative;cursor:pointer;flex:none;margin:0}
+.tog input::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:transform .15s}
+.tog input:checked{background:var(--accent)}
+.tog input:checked::after{transform:translateX(20px)}
+.tog input:disabled{opacity:.4;cursor:not-allowed}
+.hint{margin:4px 0 0;color:var(--mute);font-size:.85rem}
 </style>
 </head>
 <body>
@@ -49,6 +56,9 @@ li.done .st{color:var(--accent)}li.fail .st{color:var(--bad)}li.fail .bar i{back
 
   <label for="pass">Passcode</label>
   <input id="pass" type="password" placeholder="Enter your upload passcode" autocomplete="off">
+
+  <label class="tog"><span>Background upload</span><input type="checkbox" id="bg"></label>
+  <p class="hint" id="bgnote">Keeps uploading after you close this tab. Chrome on Android only.</p>
 
   <button type="button" id="go" disabled>Upload</button>
   <p id="msg" role="status"></p>
@@ -115,6 +125,7 @@ const row = (li, text) => { li.querySelector('.st').textContent = text; };
 // Press Upload
 go.addEventListener('click', async () => {
   if (!pass.value) { say('Enter your passcode first.', 'bad'); pass.focus(); return; }
+  if (bgBox.checked && bgOK) { await runBackground(); return; }
   busy = true; refresh();
   const todo = items.filter(i => !i.done);
   let ok = 0, auth = false;
@@ -170,6 +181,82 @@ function put(url, file, li) {
     x.onerror = () => reject(new Error('Upload blocked. Use the https address of your hosted site.'));
     x.send(file);
   });
+}
+
+// ---------- Background upload (separate feature, off by default) ----------
+const bgBox = $('bg'), bgNote = $('bgnote');
+const bgOK = 'serviceWorker' in navigator && 'BackgroundFetchManager' in self && location.protocol.startsWith('http');
+if (bgOK) { try { bgBox.checked = localStorage.getItem('bg') === '1'; } catch (e) {} }
+else { bgBox.disabled = true; bgNote.textContent = 'Not available here. It needs Chrome on Android, opened from your https site.'; }
+bgBox.addEventListener('change', () => { try { localStorage.setItem('bg', bgBox.checked ? '1' : '0'); } catch (e) {} });
+
+let bgListening = false;
+function bgListen() {
+  if (bgListening) return;
+  bgListening = true;
+  navigator.serviceWorker.addEventListener('message', e => {
+    const m = e.data || {};
+    const it = items.find(i => i.bgId === m.id);
+    if (!it) return;
+    if (m.ok) { it.li.querySelector('i').style.width = '100%'; row(it.li, 'Uploaded ✓'); it.li.classList.add('done'); }
+    else { it.done = false; row(it.li, m.error || 'Upload failed'); it.li.classList.add('fail'); refresh(); }
+  });
+}
+
+async function getSession(file) {
+  const r = await fetch(SCRIPT_URL, {
+    method: 'POST',
+    body: JSON.stringify({ secret: pass.value, name: file.name, type: file.type || 'application/octet-stream', origin: location.origin })
+  });
+  let j;
+  try { j = JSON.parse(await r.text()); } catch (e) { throw new Error('Uploader gave no valid answer.'); }
+  if (!j.ok) throw new Error(j.error || 'Rejected');
+  return j.url;
+}
+
+async function runBackground() {
+  busy = true; refresh();
+  const todo = items.filter(i => !i.done);
+  let queued = 0, refused = '', stop = '';
+  try {
+    say('Handing files to Chrome…');
+    await navigator.serviceWorker.register('sw.js');
+    const reg = await navigator.serviceWorker.ready;
+    bgListen();
+    for (const it of todo) {
+      const { file, li } = it;
+      li.classList.remove('fail');
+      try {
+        row(li, 'Starting…');
+        const url = await getSession(file);
+        const id = 'up-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+        let bf;
+        try {
+          bf = await reg.backgroundFetch.fetch(id, new Request(url, { method: 'PUT', body: file }), { title: 'Uploading ' + file.name });
+        } catch (e) {
+          refused = e.name + ': ' + e.message;
+          await upload(it); // Chrome said no: do the normal upload (tab must stay open)
+          continue;
+        }
+        it.bgId = id; it.done = true; queued++;
+        row(li, 'Sent to Chrome');
+        bf.addEventListener('progress', () => {
+          if (!bf.uploadTotal || bf.result === 'success') return;
+          const p = Math.round(bf.uploaded / bf.uploadTotal * 100);
+          li.querySelector('i').style.width = p + '%'; row(li, 'Uploading ' + p + '%');
+        });
+      } catch (err) {
+        row(li, err.message); li.classList.add('fail');
+        if (err.message === 'Wrong passcode') { stop = 'Wrong passcode. Check it and press Upload again.'; break; }
+      }
+    }
+  } catch (err) {
+    stop = 'Background mode could not start: ' + err.message;
+  }
+  busy = false; refresh();
+  if (stop) say(stop, 'bad');
+  else if (refused) say('Chrome refused background mode (' + refused + '). Files were uploaded the normal way instead.', 'bad');
+  else if (queued) say(queued + (queued > 1 ? ' files are' : ' file is') + ' with Chrome now. You can close this tab. Progress shows in a Chrome notification.', 'ok');
 }
 </script>
 </body>
