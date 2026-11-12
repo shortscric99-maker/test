@@ -203,21 +203,12 @@ function bgListen() {
   });
 }
 
-async function getSession(file) {
-  const r = await fetch(SCRIPT_URL, {
-    method: 'POST',
-    body: JSON.stringify({ secret: pass.value, name: file.name, type: file.type || 'application/octet-stream', origin: location.origin })
-  });
-  let j;
-  try { j = JSON.parse(await r.text()); } catch (e) { throw new Error('Uploader gave no valid answer.'); }
-  if (!j.ok) throw new Error(j.error || 'Rejected');
-  return j.url;
-}
+const BG_MAX = 40 * 1048576; // bigger files use the normal upload
 
 async function runBackground() {
   busy = true; refresh();
   const todo = items.filter(i => !i.done);
-  let queued = 0, refused = '', stop = '';
+  let queued = 0, normal = 0, refused = '', stop = '';
   try {
     say('Handing files to Chrome…');
     await navigator.serviceWorker.register('sw.js');
@@ -226,13 +217,15 @@ async function runBackground() {
     for (const it of todo) {
       const { file, li } = it;
       li.classList.remove('fail');
+      if (file.size > BG_MAX) { normal++; await upload(it); continue; }
       try {
-        row(li, 'Starting…');
-        const url = await getSession(file);
         const id = 'up-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+        const url = SCRIPT_URL + '?direct=1&secret=' + encodeURIComponent(pass.value) +
+          '&name=' + encodeURIComponent(file.name) + '&type=' + encodeURIComponent(file.type || 'application/octet-stream');
+        const req = new Request(url, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: file });
         let bf;
         try {
-          bf = await reg.backgroundFetch.fetch(id, new Request(url, { method: 'PUT', body: file }), { title: 'Uploading ' + file.name });
+          bf = await reg.backgroundFetch.fetch(id, req, { title: 'Uploading ' + file.name });
         } catch (e) {
           refused = e.name + ': ' + e.message;
           await upload(it); // Chrome said no: do the normal upload (tab must stay open)
@@ -247,7 +240,6 @@ async function runBackground() {
         });
       } catch (err) {
         row(li, err.message); li.classList.add('fail');
-        if (err.message === 'Wrong passcode') { stop = 'Wrong passcode. Check it and press Upload again.'; break; }
       }
     }
   } catch (err) {
@@ -256,7 +248,8 @@ async function runBackground() {
   busy = false; refresh();
   if (stop) say(stop, 'bad');
   else if (refused) say('Chrome refused background mode (' + refused + '). Files were uploaded the normal way instead.', 'bad');
-  else if (queued) say(queued + (queued > 1 ? ' files are' : ' file is') + ' with Chrome now. You can close this tab. Progress shows in a Chrome notification.', 'ok');
+  else say((queued ? queued + (queued > 1 ? ' files are' : ' file is') + ' with Chrome now. You can close this tab. ' : '') +
+           (normal ? normal + (normal > 1 ? ' files' : ' file') + ' over 40 MB uploaded the normal way.' : ''), 'ok');
 }
 </script>
 </body>
