@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drive Uploader</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>Send to Drive</h1>
+  <p class="sub">Choose photos, videos, audio or any file. They land in your Drive folder.</p>
+
+  <label class="drop" id="drop">
+    <input type="file" id="file" multiple hidden>
+    <strong>Choose files</strong>
+    <span>or drop them here</span>
+  </label>
+
+  <input id="pass" type="password" placeholder="Upload passcode (saved on this device)" autocomplete="off">
+
+  <ul id="list"></ul>
+</main>
+<script src="script.js"></script>
+</body>
+</html>
