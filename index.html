@@ -4,23 +4,173 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Drive Uploader</title>
-<link rel="stylesheet" href="style.css">
+<style>
+:root{--bg:#eef1ee;--ink:#1c2a2a;--mute:#5d6b6b;--card:#fff;--line:#c9d3cf;--accent:#0f766e;--on:#fff;--bad:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#121a1a;--ink:#e6efed;--mute:#93a4a1;--card:#1b2626;--line:#33423f;--accent:#2dd4bf;--on:#062321;--bad:#f97066}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Avenir Next","Segoe UI",system-ui,sans-serif}
+main{max-width:560px;margin:0 auto;padding:max(28px,env(safe-area-inset-top)) 20px 40px}
+h1{font-size:2rem;margin:0 0 4px;letter-spacing:-.02em}
+.sub{margin:0 0 18px;color:var(--mute)}
+.banner{padding:10px 12px;margin-bottom:16px;background:var(--card);border:1px solid var(--line);border-radius:10px;font-size:.9rem}
+.ok{color:var(--accent)}.bad{color:var(--bad)}
+.drop{display:flex;flex-direction:column;align-items:center;gap:8px;padding:34px 16px;border:2px dashed var(--line);border-radius:14px;background:var(--card);cursor:pointer;text-align:center}
+.drop.over{border-color:var(--accent)}
+.drop span{color:var(--mute);font-size:.9rem}
+button{font:inherit;cursor:pointer;border:0;border-radius:10px;padding:12px 18px}
+#pick{background:var(--card);color:var(--accent);border:1px solid var(--accent);font-weight:600}
+label{display:block;margin:18px 0 6px;font-weight:600;font-size:.95rem}
+#pass{width:100%;padding:12px;font:inherit;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:10px}
+#go{width:100%;margin-top:14px;background:var(--accent);color:var(--on);font-weight:700}
+#go:disabled{opacity:.45;cursor:not-allowed}
+#msg{min-height:1.5em;margin:12px 0}
+ul{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+li{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.top{display:flex;justify-content:space-between;gap:12px;font-size:.95rem}
+.name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st{color:var(--mute);text-align:right}
+.bar{height:6px;margin-top:8px;background:var(--line);border-radius:3px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--accent)}
+li.done .st{color:var(--accent)}li.fail .st{color:var(--bad)}li.fail .bar i{background:var(--bad)}
+</style>
 </head>
 <body>
 <main>
   <h1>Send to Drive</h1>
-  <p class="sub">Choose photos, videos, audio or any file. They land in your Drive folder.</p>
+  <p class="sub">Choose photos, videos, audio or any file, then press Upload.</p>
 
-  <label class="drop" id="drop">
-    <input type="file" id="file" multiple hidden>
-    <strong>Choose files</strong>
+  <div id="banner" class="banner">Checking connection…</div>
+
+  <div class="drop" id="drop">
+    <button type="button" id="pick">Choose files</button>
     <span>or drop them here</span>
-  </label>
+    <input type="file" id="file" multiple hidden>
+  </div>
 
-  <input id="pass" type="password" placeholder="Upload passcode (saved on this device)" autocomplete="off">
+  <label for="pass">Passcode</label>
+  <input id="pass" type="password" placeholder="Enter your upload passcode" autocomplete="off">
 
+  <button type="button" id="go" disabled>Upload</button>
+  <p id="msg" role="status"></p>
   <ul id="list"></ul>
 </main>
-<script src="script.js"></script>
+
+<script>
+const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyuEX0scPt70-IPL10b5euk6SKOoCHbyKwqoghrbM1c9mdbz2FlbN2xlbtr25QhPPxK/exec';
+
+const $ = id => document.getElementById(id);
+const banner = $('banner'), drop = $('drop'), input = $('file'), pass = $('pass'),
+      go = $('go'), msg = $('msg'), list = $('list');
+let items = [], busy = false;
+
+const say = (t, k) => { msg.textContent = t; msg.className = k || ''; };
+const note = (t, k) => { banner.textContent = t; banner.className = 'banner ' + (k || ''); };
+const fmt = b => b < 1048576 ? Math.max(1, Math.round(b / 1024)) + ' KB' : (b / 1048576).toFixed(1) + ' MB';
+
+// Show any hidden script problem on the page instead of failing silently
+window.addEventListener('error', e => note('Page error: ' + e.message, 'bad'));
+
+// Remember the passcode on this device
+try { pass.value = localStorage.getItem('pass') || ''; } catch (e) {}
+pass.addEventListener('input', () => { try { localStorage.setItem('pass', pass.value); } catch (e) {} say(''); });
+
+// Connection check
+if (location.protocol === 'file:') {
+  note('This page is open as a local file. Uploads need the hosted https address of your site.', 'bad');
+} else {
+  fetch(SCRIPT_URL).then(r => r.json()).then(j => {
+    j.ok ? note('Connected. Ready to upload.', 'ok') : note('The uploader replied with an error.', 'bad');
+  }).catch(() => note('Cannot reach the uploader. In Apps Script, deploy as Web app with access set to Anyone.', 'bad'));
+}
+
+// Choosing files
+$('pick').addEventListener('click', e => { e.stopPropagation(); input.click(); });
+drop.addEventListener('click', () => input.click());
+input.addEventListener('change', () => { add(input.files); input.value = ''; });
+['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => add(e.dataTransfer.files));
+
+function add(files) {
+  const picked = [...files];
+  picked.forEach(file => {
+    const li = document.createElement('li');
+    li.innerHTML = '<div class="top"><span class="name"></span><span class="st">Ready</span></div><div class="bar"><i></i></div>';
+    li.querySelector('.name').textContent = file.name + ' (' + fmt(file.size) + ')';
+    list.appendChild(li);
+    items.push({ file, li, done: false });
+  });
+  if (picked.length) say(picked.length + (picked.length > 1 ? ' files' : ' file') + ' added. Enter the passcode and press Upload.');
+  refresh();
+}
+
+function refresh() {
+  const n = items.filter(i => !i.done).length;
+  go.disabled = busy || !n;
+  go.textContent = n ? 'Upload ' + n + (n > 1 ? ' files' : ' file') : 'Upload';
+}
+
+const row = (li, text) => { li.querySelector('.st').textContent = text; };
+
+// Press Upload
+go.addEventListener('click', async () => {
+  if (!pass.value) { say('Enter your passcode first.', 'bad'); pass.focus(); return; }
+  busy = true; refresh();
+  const todo = items.filter(i => !i.done);
+  let ok = 0, auth = false;
+  for (let k = 0; k < todo.length && !auth; k++) {
+    say('Uploading ' + (k + 1) + ' of ' + todo.length + '. Keep this page open.');
+    const r = await upload(todo[k]);
+    if (r === true) ok++;
+    if (r === 'auth') auth = true;
+  }
+  busy = false; refresh();
+  if (auth) say('Wrong passcode. Check it and press Upload again.', 'bad');
+  else if (ok === todo.length) say('Done. ' + ok + (ok > 1 ? ' files are' : ' file is') + ' in your Drive folder.', 'ok');
+  else say(ok + ' uploaded, ' + (todo.length - ok) + ' failed. See the red items, then press Upload to retry.', 'bad');
+});
+
+async function upload(it) {
+  const { file, li } = it;
+  li.classList.remove('fail');
+  li.querySelector('i').style.width = '0';
+  try {
+    row(li, 'Starting…');
+    const type = file.type || 'application/octet-stream';
+    const r = await fetch(SCRIPT_URL, {
+      method: 'POST',
+      body: JSON.stringify({ secret: pass.value, name: file.name, type, origin: location.protocol.startsWith('http') ? location.origin : '' })
+    });
+    let j;
+    try { j = JSON.parse(await r.text()); }
+    catch (e) { throw new Error('Uploader gave no valid answer. Redeploy the web app with access set to Anyone.'); }
+    if (!j.ok) throw new Error(j.error || 'Rejected');
+
+    await put(j.url, file, li);
+    li.querySelector('i').style.width = '100%';
+    row(li, 'Uploaded ✓'); li.classList.add('done'); it.done = true;
+    return true;
+  } catch (err) {
+    row(li, err.message); li.classList.add('fail');
+    return err.message === 'Wrong passcode' ? 'auth' : false;
+  }
+}
+
+function put(url, file, li) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('PUT', url);
+    x.upload.onprogress = e => {
+      if (!e.lengthComputable) return;
+      const p = Math.round(e.loaded / e.total * 100);
+      li.querySelector('i').style.width = p + '%';
+      row(li, 'Uploading ' + p + '%');
+    };
+    x.onload = () => x.status < 300 ? resolve() : reject(new Error('Drive error ' + x.status));
+    x.onerror = () => reject(new Error('Upload blocked. Use the https address of your hosted site.'));
+    x.send(file);
+  });
+}
+</script>
 </body>
 </html>
